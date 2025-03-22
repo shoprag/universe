@@ -26,7 +26,7 @@ async function main() {
     // Check if essential configurations are missing
     if (!process.env.OPENAI_API_KEY || !process.env.BEARER_TOKEN) {
         await setupConfig();
-        dotenv.config({ path: path.join(__dirname, '.env') });
+        dotenv.config({ path: path.join(process.cwd(), '.env') });
     }
 
     // Set up CLI parsing with Commander
@@ -346,7 +346,7 @@ async function main() {
  * Creates a .env file with user-provided or default values.
  */
 async function setupConfig() {
-    if (fs.existsSync(path.join(__dirname, '.env'))) {
+    if (fs.existsSync(path.join(process.cwd(), '.env'))) {
         console.log('A .env file already exists. Please edit it manually if needed.');
         process.exit(1);
     }
@@ -431,7 +431,7 @@ DATA_DIR=${answers.dataDir}
 LOG_REQUESTS=${answers.logRequests.toString()}
     `.trim();
 
-    fs.writeFileSync(path.join(__dirname, '.env'), envContent);
+    fs.writeFileSync(path.join(process.cwd(), '.env'), envContent);
     console.log(chalk.green('.env file created successfully! 🎉'));
 }
 
