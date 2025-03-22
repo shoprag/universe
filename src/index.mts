@@ -364,11 +364,13 @@ async function main() {
                 res.status(400).json({ error: 'Invalid universe name.' });
                 return;
             }
-
-            const index = await getIndex(universe);
-            const items = await index.listItems();
-            await Promise.all(items.map(item => index.deleteItem(item.id)));
-            res.status(200).json({ status: 'success' });
+            try {
+                delete universes[universe];
+                fs.rmdirSync(path.join(config.dataDir, universe));
+                res.status(200).json({ status: 'success' });
+            } catch (_) {
+                res.status(404).json({ error: 'Universe not found.' })
+            }
         } catch (error) {
             logger.error('Error in DELETE /universe:', error);
             res.status(500).json({ error: 'Internal server error' });
