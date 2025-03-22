@@ -92,8 +92,8 @@ async function main() {
 
     // Serve the UI
     app.get('/', (_, res: Response) => {
-        res.set('content-type', 'application/html')
-        res.status(200).send(UI())
+        res.set('content-type', 'text/html')
+        res.send(UI())
     })
 
     // Middleware to authenticate bearer token
