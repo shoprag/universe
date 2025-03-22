@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import express, { Request, Response, NextFunction } from 'express';
 import bodyParser from 'body-parser';
 import { LocalIndex } from 'vectra';
