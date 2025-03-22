@@ -68,6 +68,15 @@ async function main() {
 
     // Set up Express app
     const app = express();
+
+    // Serve the UI
+    app.get('/', (_, res: Response) => {
+        res.status(200).set({
+            'Content-Type': 'text/html'
+        }).send(UI())
+    })
+
+    // Parse JSON bodies and set up CORS
     app.use(bodyParser.json({ limit: '100mb' }));
     app.use((req: Request, res: Response, next: NextFunction) => {
         res.header('Access-Control-Allow-Origin', '*');
@@ -89,12 +98,6 @@ async function main() {
             next();
         });
     }
-
-    // Serve the UI
-    app.get('/', (_, res: Response) => {
-        res.set('content-type', 'text/html')
-        res.send(UI())
-    })
 
     // Middleware to authenticate bearer token
     const authenticateBearerToken = (req: Request, res: Response, next: NextFunction) => {
