@@ -105,21 +105,23 @@ async function main() {
 
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
             logger.warn('Missing or invalid authorization header');
-            return res.status(401).json({
+            res.status(401).json({
                 status: 'error',
                 code: 'ERR_NO_AUTH_TOKEN',
                 description: 'Authorization header missing or invalid format. Expecting "Bearer [TOKEN]".',
             });
+            return
         }
 
         const token = authHeader.split(' ')[1];
         if (token !== config.bearerToken) {
             logger.warn('Invalid bearer token');
-            return res.status(403).json({
+            res.status(403).json({
                 status: 'error',
                 code: 'ERR_INVALID_AUTH_TOKEN',
                 description: 'Provided token is invalid.',
             });
+            return
         }
 
         next();
@@ -181,7 +183,7 @@ async function main() {
      * - "'thing' must be an object with 'text' and optional 'id'."
      * - "Invalid universe name." (only alphanumeric and underscores allowed)
      */
-    app.post('/emit', async (req: Request, res: Response) => {
+    app.post('/emit', async (req: Request, res: Response): Promise<void> => {
         try {
             const { universe, thing, things, replace }: {
                 universe: string;
@@ -190,14 +192,25 @@ async function main() {
                 replace?: string;
             } = req.body;
 
-            if (!universe) return res.status(400).json({ error: 'Universe is required.' });
-            if (!/^[a-zA-Z0-9_]+$/.test(universe)) return res.status(400).json({ error: 'Invalid universe name.' });
-            if (thing && things) return res.status(400).json({ error: 'You cannot provide both "thing" and "things".' });
+            if (!universe) {
+                res.status(400).json({ error: 'Universe is required.' });
+                return;
+            }
+            if (!/^[a-zA-Z0-9_]+$/.test(universe)) {
+                res.status(400).json({ error: 'Invalid universe name.' });
+                return;
+            }
+            if (thing && things) {
+                res.status(400).json({ error: 'You cannot provide both "thing" and "things".' });
+                return;
+            }
             if (things && (!Array.isArray(things) || !things.every(t => typeof t === 'object' && 'text' in t))) {
-                return res.status(400).json({ error: '"things" must be an array of objects with "text" and optional "id".' });
+                res.status(400).json({ error: '"things" must be an array of objects with "text" and optional "id".' });
+                return
             }
             if (thing && (typeof thing !== 'object' || !('text' in thing))) {
-                return res.status(400).json({ error: '"thing" must be an object with "text" and optional "id".' });
+                res.status(400).json({ error: '"thing" must be an object with "text" and optional "id".' });
+                return
             }
 
             const index = await getIndex(universe);
@@ -246,15 +259,25 @@ async function main() {
      * - "Reach must be a positive integer."
      * - "Invalid universe name."
      */
-    app.post('/resonate', async (req: Request, res: Response) => {
+    app.post('/resonate', async (req: Request, res: Response): Promise<void> => {
         try {
             const { universe, thing, reach }: { universe: string; thing: string; reach?: number } = req.body;
 
-            if (!universe) return res.status(400).json({ error: 'Universe is required.' });
-            if (!/^[a-zA-Z0-9_]+$/.test(universe)) return res.status(400).json({ error: 'Invalid universe name.' });
-            if (!thing) return res.status(400).json({ error: 'Thing is required.' });
+            if (!universe) {
+                res.status(400).json({ error: 'Universe is required.' });
+                return;
+            }
+            if (!/^[a-zA-Z0-9_]+$/.test(universe)) {
+                res.status(400).json({ error: 'Invalid universe name.' });
+                return;
+            }
+            if (!thing) {
+                res.status(400).json({ error: 'Thing is required.' });
+                return;
+            }
             if (reach !== undefined && (!Number.isInteger(reach) || reach < 1)) {
-                return res.status(400).json({ error: 'Reach must be a positive integer.' });
+                res.status(400).json({ error: 'Reach must be a positive integer.' });
+                return;
             }
 
             const index = await getIndex(universe);
@@ -287,13 +310,22 @@ async function main() {
      * - "ID is required."
      * - "Invalid universe name."
      */
-    app.delete('/thing/:universe/:id', async (req: Request, res: Response) => {
+    app.delete('/thing/:universe/:id', async (req: Request, res: Response): Promise<void> => {
         try {
             const { universe, id } = req.params;
 
-            if (!universe) return res.status(400).json({ error: 'Universe is required.' });
-            if (!/^[a-zA-Z0-9_]+$/.test(universe)) return res.status(400).json({ error: 'Invalid universe name.' });
-            if (!id) return res.status(400).json({ error: 'ID is required.' });
+            if (!universe) {
+                res.status(400).json({ error: 'Universe is required.' });
+                return;
+            }
+            if (!/^[a-zA-Z0-9_]+$/.test(universe)) {
+                res.status(400).json({ error: 'Invalid universe name.' });
+                return;
+            }
+            if (!id) {
+                res.status(400).json({ error: 'ID is required.' });
+                return;
+            }
 
             const index = await getIndex(universe);
             await index.deleteItem(id);
@@ -320,12 +352,18 @@ async function main() {
      * - "Universe is required."
      * - "Invalid universe name."
      */
-    app.delete('/universe/:universe', async (req: Request, res: Response) => {
+    app.delete('/universe/:universe', async (req: Request, res: Response): Promise<void> => {
         try {
             const { universe } = req.params;
 
-            if (!universe) return res.status(400).json({ error: 'Universe is required.' });
-            if (!/^[a-zA-Z0-9_]+$/.test(universe)) return res.status(400).json({ error: 'Invalid universe name.' });
+            if (!universe) {
+                res.status(400).json({ error: 'Universe is required.' });
+                return;
+            }
+            if (!/^[a-zA-Z0-9_]+$/.test(universe)) {
+                res.status(400).json({ error: 'Invalid universe name.' });
+                return;
+            }
 
             const index = await getIndex(universe);
             const items = await index.listItems();
