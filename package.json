@@ -1,0 +1,34 @@
+{
+    "name": "@shoprag/universe",
+    "version": "1.0.0",
+    "description": "Web server, embedder, and vector database for emitting and resonating with things",
+    "main": "dist/index.mjs",
+    "types": "dist/index.d.mts",
+    "type": "module",
+    "bin": {
+        "universe": "dist/index.mjs"
+    },
+    "scripts": {
+        "build": "tsc -b"
+    },
+    "keywords": [],
+    "author": "Peer-to-peer Privacy Systems Research, LLC",
+    "license": "MIT",
+    "dependencies": {
+        "body-parser": "^1.20.3",
+        "commander": "^13.1.0",
+        "dotenv": "^16.4.7",
+        "express": "^4.21.2",
+        "figlet": "^1.8.0",
+        "inquirer": "^12.5.0",
+        "openai": "^4.89.0",
+        "vectra": "^0.9.0",
+        "winston": "^3.17.0"
+    },
+    "devDependencies": {
+        "@types/body-parser": "^1.19.5",
+        "@types/figlet": "^1.7.0",
+        "@types/node": "^22.10.1",
+        "typescript": "^5.7.2"
+    }
+}
