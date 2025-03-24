@@ -4,6 +4,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import bodyParser from 'body-parser';
 import { LocalIndex } from 'vectra';
 import OpenAI from 'openai';
+import { VoyageAIClient } from 'voyageai';
 import path from 'path';
 import dotenv from 'dotenv';
 import { Command } from 'commander';
@@ -19,12 +20,68 @@ import UI from './UI.mjs'
 dotenv.config();
 
 /**
+ * Interface for embedding providers
+ */
+interface EmbeddingProvider {
+    getEmbeddings(texts: string[]): Promise<number[][]>;
+    maxTokens: number;
+}
+
+/**
+ * OpenAI embedding provider
+ */
+class OpenAIProvider implements EmbeddingProvider {
+    private client: OpenAI;
+    private model: string;
+    public maxTokens: number = 8191;
+
+    constructor(apiKey: string, baseUrl: string, model: string) {
+        this.client = new OpenAI({
+            apiKey,
+            baseURL: baseUrl,
+        });
+        this.model = model;
+    }
+
+    async getEmbeddings(texts: string[]): Promise<number[][]> {
+        const response = await this.client.embeddings.create({
+            model: this.model,
+            input: texts,
+        });
+        return response.data.map(d => d.embedding);
+    }
+}
+
+/**
+ * Voyage embedding provider
+ */
+class VoyageProvider implements EmbeddingProvider {
+    private client: VoyageAIClient;
+    private model: string;
+    public maxTokens: number = 32000;
+
+    constructor(apiKey: string, model: string) {
+        this.client = new VoyageAIClient({ apiKey });
+        this.model = model;
+    }
+
+    async getEmbeddings(texts: string[]): Promise<number[][]> {
+        const response = await this.client.embed({
+            input: texts,
+            model: this.model,
+        });
+        // Voyage API returns embeddings in response.data as an array of objects with 'embedding' property
+        return response.data.map(d => d.embedding);
+    }
+}
+
+/**
  * Main function to start the Universe server.
  * Checks for required configurations, performs setup if needed, and launches the server.
  */
 async function main() {
     // Check if essential configurations are missing
-    if (!process.env.OPENAI_API_KEY || !process.env.BEARER_TOKEN) {
+    if (!process.env.PROVIDER || !process.env.API_KEY || !process.env.BEARER_TOKEN) {
         await setupConfig();
         dotenv.config({ path: path.join(process.cwd(), '.env') });
     }
@@ -33,16 +90,29 @@ async function main() {
     const program = new Command();
     program
         .option('-p, --port <port>', 'Port to listen on', process.env.PORT || '8080')
+        .option('--provider <provider>', 'Embedding provider (openai, voyage)', process.env.PROVIDER || 'openai')
+        .option('--api-key <key>', 'API key for the provider', process.env.API_KEY)
+        .option('--model <model>', 'Embedding model to use', process.env.MODEL)
+        .option('--base-url <url>', 'Base URL for the provider (only for OpenAI)', process.env.BASE_URL)
         .option('--bearer-token <token>', 'Bearer token for authentication', process.env.BEARER_TOKEN)
-        .option('--openai-api-key <key>', 'OpenAI API key', process.env.OPENAI_API_KEY)
-        .option('--openai-base-url <url>', 'OpenAI base URL', process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1')
-        .option('--embeddings-model <model>', 'Embeddings model to use', process.env.EMBEDDINGS_MODEL || 'text-embedding-ada-002')
         .option('--log-level <level>', 'Log level (debug, info, critical)', process.env.LOG_LEVEL || 'info')
         .option('--data-dir <dir>', 'Directory to store data', process.env.DATA_DIR || './data')
         .option('--log-requests', 'Log incoming requests', process.env.LOG_REQUESTS === 'true')
         .parse(process.argv);
 
     const config = program.opts();
+
+    // Set provider-specific defaults if not provided
+    if (!config.model) {
+        if (config.provider === 'openai') {
+            config.model = 'text-embedding-ada-002';
+        } else if (config.provider === 'voyage') {
+            config.model = 'voyage-code-3';
+        }
+    }
+    if (config.provider === 'openai' && !config.baseUrl) {
+        config.baseUrl = 'https://api.openai.com/v1';
+    }
 
     // Initialize logger with configurable level
     const logger = winston.createLogger({
@@ -55,11 +125,21 @@ async function main() {
         transports: [new winston.transports.Console()],
     });
 
-    // Initialize OpenAI client
-    const api = new OpenAI({
-        apiKey: config.openaiApiKey,
-        baseURL: config.openaiBaseUrl,
-    });
+    // Instantiate the embedding provider
+    let provider: EmbeddingProvider;
+    if (config.provider === 'openai') {
+        if (!config.apiKey) {
+            throw new Error('API key is required for OpenAI');
+        }
+        provider = new OpenAIProvider(config.apiKey, config.baseUrl, config.model);
+    } else if (config.provider === 'voyage') {
+        if (!config.apiKey) {
+            throw new Error('API key is required for Voyage');
+        }
+        provider = new VoyageProvider(config.apiKey, config.model);
+    } else {
+        throw new Error(`Unsupported provider: ${config.provider}`);
+    }
 
     // Ensure data directory exists
     if (!fs.existsSync(config.dataDir)) {
@@ -73,8 +153,8 @@ async function main() {
     app.get('/', (_, res: Response) => {
         res.status(200).set({
             'Content-Type': 'text/html'
-        }).send(UI())
-    })
+        }).send(UI());
+    });
 
     // Parse JSON bodies and set up CORS
     app.use(bodyParser.json({ limit: '100mb' }));
@@ -110,7 +190,7 @@ async function main() {
                 code: 'ERR_NO_AUTH_TOKEN',
                 description: 'Authorization header missing or invalid format. Expecting "Bearer [TOKEN]".',
             });
-            return
+            return;
         }
 
         const token = authHeader.split(' ')[1];
@@ -121,7 +201,7 @@ async function main() {
                 code: 'ERR_INVALID_AUTH_TOKEN',
                 description: 'Provided token is invalid.',
             });
-            return
+            return;
         }
 
         next();
@@ -143,20 +223,6 @@ async function main() {
             universes[universe] = index;
         }
         return index;
-    };
-
-    // Helper to get embedding vector
-    const getVector = async (text: string): Promise<number[]> => {
-        try {
-            const response = await api.embeddings.create({
-                model: config.embeddingsModel,
-                input: text,
-            });
-            return response.data[0].embedding;
-        } catch (error) {
-            logger.error('Error getting vector:', error);
-            throw error;
-        }
     };
 
     // Routes
@@ -206,31 +272,48 @@ async function main() {
             }
             if (things && (!Array.isArray(things) || !things.every(t => typeof t === 'object' && 'text' in t))) {
                 res.status(400).json({ error: '"things" must be an array of objects with "text" and optional "id".' });
-                return
+                return;
             }
             if (thing && (typeof thing !== 'object' || !('text' in thing))) {
                 res.status(400).json({ error: '"thing" must be an object with "text" and optional "id".' });
-                return
+                return;
             }
 
             const index = await getIndex(universe);
 
-            const insertThing = async (t: { text: string; id?: string }) => {
-                const vector = await getVector(t.text);
-                if (t.id) {
-                    const items = await index.listItems();
-                    if (items.find(item => item.id === t.id)) {
-                        await index.deleteItem(t.id);
-                    }
-                    await index.insertItem({ id: t.id, vector, metadata: { text: t.text } });
-                } else {
-                    await index.insertItem({ vector, metadata: { text: t.text } });
-                }
-            };
+            let texts: string[];
+            let ids: (string | undefined)[];
+            if (things) {
+                texts = things.map(t => t.text);
+                ids = things.map(t => t.id);
+            } else if (thing) {
+                texts = [thing.text];
+                ids = [thing.id];
+            } else {
+                res.status(400).json({ error: 'Either "thing" or "things" must be provided.' });
+                return;
+            }
 
-            if (things) await Promise.all(things.map(insertThing));
-            else if (thing) await insertThing(thing);
-            if (replace) await index.deleteItem(replace);
+            const vectors = await provider.getEmbeddings(texts);
+
+            for (let i = 0; i < texts.length; i++) {
+                const id = ids[i];
+                const vector = vectors[i];
+                const metadata = { text: texts[i] };
+                if (id) {
+                    const items = await index.listItems();
+                    if (items.find(item => item.id === id)) {
+                        await index.deleteItem(id);
+                    }
+                    await index.insertItem({ id, vector, metadata });
+                } else {
+                    await index.insertItem({ vector, metadata });
+                }
+            }
+
+            if (replace) {
+                await index.deleteItem(replace);
+            }
 
             res.status(200).json({ status: 'success' });
         } catch (error) {
@@ -281,7 +364,8 @@ async function main() {
             }
 
             const index = await getIndex(universe);
-            const results = await index.queryItems(await getVector(thing), reach || 10);
+            const queryVector = await provider.getEmbeddings([thing])[0];
+            const results = await index.queryItems(queryVector, reach || 10);
             res.status(200).json({
                 status: 'success',
                 results: results.map(x => ({ closeness: x.score, thing: x.item.metadata.text, id: x.item.id })),
@@ -356,7 +440,6 @@ async function main() {
         try {
             const { universe } = req.params;
 
-            // Validate universe parameter
             if (!universe) {
                 res.status(400).json({ error: 'Universe is required.' });
                 return;
@@ -366,10 +449,8 @@ async function main() {
                 return;
             }
 
-            // Construct the full path to the universe directory
             const universePath = path.join(config.dataDir, universe);
 
-            // Check if the universe directory exists
             try {
                 await fs.promises.access(universePath);
             } catch (error) {
@@ -377,10 +458,9 @@ async function main() {
                 return;
             }
 
-            // Attempt to delete the directory and its contents
             try {
                 await fs.promises.rm(universePath, { recursive: true });
-                delete universes[universe]; // Remove from in-memory cache
+                delete universes[universe];
                 res.status(200).json({ status: 'success' });
             } catch (error) {
                 logger.error('Error deleting universe:', error);
@@ -412,12 +492,64 @@ async function setupConfig() {
     console.log(chalk.cyan('Welcome to Universe setup! 🌌'));
     console.log('We need some info to get your Universe server running smoothly.');
 
-    const answers = await inquirer.prompt([
+    const providerAnswer = await inquirer.prompt([
+        {
+            type: 'list',
+            name: 'provider',
+            message: 'Which embedding provider do you want to use?',
+            choices: ['openai', 'voyage'],
+        },
+    ]);
+    const provider = providerAnswer.provider;
+
+    let providerQuestions = [];
+    if (provider === 'openai') {
+        providerQuestions = [
+            {
+                type: 'input',
+                name: 'apiKey',
+                message: 'Enter your OpenAI API key:',
+                validate: (input: string) => input.trim() ? true : 'API key is required!',
+            },
+            {
+                type: 'input',
+                name: 'baseUrl',
+                message: 'Enter the OpenAI base URL:',
+                default: 'https://api.openai.com/v1',
+            },
+            {
+                type: 'input',
+                name: 'model',
+                message: 'Enter the embeddings model to use:',
+                default: 'text-embedding-ada-002',
+            },
+        ];
+    } else if (provider === 'voyage') {
+        providerQuestions = [
+            {
+                type: 'input',
+                name: 'apiKey',
+                message: 'Enter your Voyage API key:',
+                validate: (input: string) => input.trim() ? true : 'API key is required!',
+            },
+            {
+                type: 'input',
+                name: 'model',
+                message: 'Enter the embeddings model to use:',
+                default: 'voyage-1', // Adjust based on Voyage's default or preferred model
+            },
+        ];
+    }
+
+    const providerConfig = await inquirer.prompt(providerQuestions);
+
+    const generalQuestions = [
         {
             type: 'input',
-            name: 'openaiApiKey',
-            message: 'Enter your OpenAI API key:',
-            validate: (input: string) => input.trim() ? true : 'API key is required!',
+            name: 'port',
+            message: 'Port to listen on:',
+            default: '8080',
+            validate: (input: string) => !isNaN(parseInt(input)) ? true : 'Must be a number!',
         },
         {
             type: 'confirm',
@@ -431,25 +563,6 @@ async function setupConfig() {
             message: 'Enter your bearer token:',
             when: (answers: any) => !answers.generateBearerToken,
             validate: (input: string) => input.trim() ? true : 'Bearer token is required!',
-        },
-        {
-            type: 'input',
-            name: 'port',
-            message: 'Port to listen on:',
-            default: '8080',
-            validate: (input: string) => !isNaN(parseInt(input)) ? true : 'Must be a number!',
-        },
-        {
-            type: 'input',
-            name: 'openaiBaseUrl',
-            message: 'OpenAI base URL:',
-            default: 'https://api.openai.com/v1',
-        },
-        {
-            type: 'input',
-            name: 'embeddingsModel',
-            message: 'Embeddings model to use:',
-            default: 'text-embedding-ada-002',
         },
         {
             type: 'input',
@@ -470,24 +583,31 @@ async function setupConfig() {
             message: 'Log incoming requests?',
             default: false,
         },
-    ]);
+    ];
 
-    if (answers.generateBearerToken) {
-        answers.bearerToken = crypto.randomBytes(32).toString('hex');
-        console.log(chalk.yellow(`Generated bearer token: ${answers.bearerToken}`));
+    const generalConfig = await inquirer.prompt(generalQuestions);
+
+    if (generalConfig.generateBearerToken) {
+        generalConfig.bearerToken = crypto.randomBytes(32).toString('hex');
+        console.log(chalk.yellow(`Generated bearer token: ${generalConfig.bearerToken}`));
         console.log('Keep this safe—it’s your key to the Universe! 🔑');
     }
 
-    const envContent = `
-PORT=${answers.port}
-BEARER_TOKEN=${answers.bearerToken}
-OPENAI_API_KEY=${answers.openaiApiKey}
-OPENAI_BASE_URL=${answers.openaiBaseUrl}
-EMBEDDINGS_MODEL=${answers.embeddingsModel}
-LOG_LEVEL=${answers.logLevel}
-DATA_DIR=${answers.dataDir}
-LOG_REQUESTS=${answers.logRequests.toString()}
-    `.trim();
+    let envContent = `
+PROVIDER=${provider}
+API_KEY=${providerConfig.apiKey}
+MODEL=${providerConfig.model}
+`;
+    if (provider === 'openai') {
+        envContent += `BASE_URL=${providerConfig.baseUrl}\n`;
+    }
+    envContent += `
+PORT=${generalConfig.port}
+BEARER_TOKEN=${generalConfig.bearerToken}
+LOG_LEVEL=${generalConfig.logLevel}
+DATA_DIR=${generalConfig.dataDir}
+LOG_REQUESTS=${generalConfig.logRequests.toString()}
+`.trim();
 
     fs.writeFileSync(path.join(process.cwd(), '.env'), envContent);
     console.log(chalk.green('.env file created successfully! 🎉'));
