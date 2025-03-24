@@ -1,6 +1,6 @@
 {
     "name": "@shoprag/universe",
-    "version": "1.0.6",
+    "version": "1.0.7",
     "description": "Web server, embedder, and vector database for emitting and resonating with things",
     "main": "dist/index.mjs",
     "types": "dist/index.d.mts",
