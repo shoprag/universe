@@ -356,6 +356,7 @@ async function main() {
         try {
             const { universe } = req.params;
 
+            // Validate universe parameter
             if (!universe) {
                 res.status(400).json({ error: 'Universe is required.' });
                 return;
@@ -364,12 +365,26 @@ async function main() {
                 res.status(400).json({ error: 'Invalid universe name.' });
                 return;
             }
+
+            // Construct the full path to the universe directory
+            const universePath = path.join(config.dataDir, universe);
+
+            // Check if the universe directory exists
             try {
-                delete universes[universe];
-                fs.rmdirSync(path.join(config.dataDir, universe));
+                await fs.promises.access(universePath);
+            } catch (error) {
+                res.status(404).json({ error: 'Universe not found.' });
+                return;
+            }
+
+            // Attempt to delete the directory and its contents
+            try {
+                await fs.promises.rm(universePath, { recursive: true });
+                delete universes[universe]; // Remove from in-memory cache
                 res.status(200).json({ status: 'success' });
-            } catch (_) {
-                res.status(404).json({ error: 'Universe not found.' })
+            } catch (error) {
+                logger.error('Error deleting universe:', error);
+                res.status(500).json({ error: `Failed to delete universe: ${error.message}` });
             }
         } catch (error) {
             logger.error('Error in DELETE /universe:', error);
