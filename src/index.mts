@@ -585,7 +585,7 @@ async function setupConfig() {
         },
     ];
 
-    const generalConfig = await inquirer.prompt(generalQuestions);
+    const generalConfig = await inquirer.prompt(generalQuestions as any);
 
     if (generalConfig.generateBearerToken) {
         generalConfig.bearerToken = crypto.randomBytes(32).toString('hex');
