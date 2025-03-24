@@ -1,6 +1,6 @@
 # 🌌 Universe
 
-Welcome to **Universe** — a powerful, easy-to-use web server, embedder, and vector database designed for developers who want to work with embeddings and vector-based queries effortlessly. With Universe, you can "emit" (store) and "resonate" (query) with text-based "things" in a universe of your choice, leveraging the power of the latest embedding models.
+Welcome to **Universe** — a powerful, easy-to-use web server, embedder, and vector database designed for developers who want to work with embeddings and vector-based queries effortlessly. With Universe, you can "emit" (store) and "resonate" (query) with text-based "things" in a universe of your choice, leveraging the power of the latest embedding models from multiple providers.
 
 Universe is built to be production-ready, highly configurable, and delightful to use. Whether you're building AI-powered applications, experimenting with vector databases, or just exploring the possibilities of embeddings, Universe has got you covered! 🚀
 
@@ -10,6 +10,7 @@ Universe is built to be production-ready, highly configurable, and delightful to
 
 - **Simple CLI Interface**: Get started with just a few commands.
 - **Flexible Configuration**: Use environment variables, CLI flags, or an interactive setup to configure your server.
+- **Multiple Embedding Providers**: Choose between OpenAI, Voyage, or other providers for generating embeddings.
 - **Secure Authentication**: Protect your server with bearer token authentication.
 - **Robust Error Handling**: Built-in error handling and logging for a smooth development experience.
 - **Interactive Setup**: Get up and running quickly with an easy-to-follow setup process.
@@ -38,7 +39,7 @@ After installation, simply run:
 universe
 ```
 
-If this is your first time, Universe will guide you through an interactive setup to configure your server. Once set up, your Universe server will start, and you'll be ready to emit and resonate with things!
+If this is your first time, Universe will guide you through an interactive setup to configure your server, including selecting an embedding provider and entering the necessary API keys. Once set up, your Universe server will start, and you'll be ready to emit and resonate with things!
 
 ---
 
@@ -62,15 +63,16 @@ Universe provides a simple CLI to manage your server:
   You can override default settings using CLI flags. For example:
 
   ```bash
-  universe --port 3000 --log-level debug
+  universe --port 3000 --log-level debug --provider openai --api-key sk-...
   ```
 
   Available flags:
   - `--port <port>`: Port to listen on (default: 8080)
+  - `--provider <provider>`: Embedding provider (e.g., `openai`, `voyage`) (default: `openai`)
+  - `--api-key <key>`: API key for the selected provider
+  - `--model <model>`: Embedding model to use (provider-specific)
+  - `--base-url <url>`: Base URL for the provider (only for OpenAI, default: https://api.openai.com/v1)
   - `--bearer-token <token>`: Bearer token for authentication
-  - `--openai-api-key <key>`: OpenAI API key
-  - `--openai-base-url <url>`: OpenAI base URL (default: https://api.openai.com/v1)
-  - `--embeddings-model <model>`: Embeddings model to use (default: text-embedding-ada-002)
   - `--log-level <level>`: Log level (debug, info, critical) (default: info)
   - `--data-dir <dir>`: Directory to store data (default: ./data)
   - `--log-requests`: Log incoming requests (default: false)
@@ -81,12 +83,18 @@ Universe provides a simple CLI to manage your server:
 
 Universe is highly configurable:
 
-- **Environment Variables**: Set variables in a `.env` file or directly in your environment.
+- **Environment Variables**: Set variables in a `.env` file or directly in your environment. Key variables include:
+  - `PROVIDER`: The embedding provider (e.g., `openai`, `voyage`)
+  - `API_KEY`: API key for the selected provider
+  - `MODEL`: Embedding model (provider-specific)
+  - `BASE_URL`: Base URL for the provider (only for OpenAI)
+  - `PORT`, `BEARER_TOKEN`, `LOG_LEVEL`, `DATA_DIR`, `LOG_REQUESTS`
 - **CLI Flags**: Override settings on the fly when starting the server.
-- **Interactive Setup**: If essential settings are missing, Universe will prompt you to configure them interactively.
+- **Interactive Setup**: If essential settings are missing, Universe will prompt you to configure them interactively, including selecting the provider and entering provider-specific details.
 
 During setup, you'll be asked for:
-- OpenAI API key
+- Embedding provider (e.g., OpenAI or Voyage)
+- Provider-specific API key and model
 - Bearer token (with an option to generate one automatically)
 - Port, log level, data directory, and more
 
@@ -96,7 +104,7 @@ All settings are saved in a `.env` file for future use.
 
 ## 📡 API Documentation
 
-Universe exposes a RESTful API for interacting with your universes:
+Universe exposes a RESTful API for interacting with your universes. The API remains the same regardless of the embedding provider chosen.
 
 ### Authentication
 
