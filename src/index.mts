@@ -364,7 +364,7 @@ async function main() {
             }
 
             const index = await getIndex(universe);
-            const queryVector = await provider.getEmbeddings([thing])[0];
+            const queryVector = (await provider.getEmbeddings([thing]))[0];
             const results = await index.queryItems(queryVector, reach || 10);
             res.status(200).json({
                 status: 'success',
