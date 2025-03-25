@@ -15,6 +15,7 @@ import figlet from 'figlet';
 import crypto from 'crypto';
 import fs from 'fs';
 import UI from './UI.mjs'
+import { EmbedRequest } from 'voyageai/api';
 
 // Load environment variables initially
 dotenv.config();
@@ -66,10 +67,14 @@ class VoyageProvider implements EmbeddingProvider {
     }
 
     async getEmbeddings(texts: string[]): Promise<number[][]> {
-        const response = await this.client.embed({
+        let request: EmbedRequest = {
             input: texts,
-            model: this.model,
-        });
+            model: this.model
+        }
+        if (request.model === 'voyage-3-large' || request.model === 'voyage-code-3') {
+            request.outputDimension = 2048
+        }
+        const response = await this.client.embed(request);
         // Voyage API returns embeddings in response.data as an array of objects with 'embedding' property
         return response.data.map(d => d.embedding);
     }
