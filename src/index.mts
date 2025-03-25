@@ -214,20 +214,30 @@ async function main() {
 
     app.use(authenticateBearerToken);
 
-    // Store universe indexes
+    // Store universe indexes and operation promises
     const universes: { [key: string]: LocalIndex } = {};
+    const creatingIndexes: Map<string, Promise<LocalIndex>> = new Map();
+    const lastOperations: Map<string, Promise<any>> = new Map();
 
-    // Helper to get or create an index for a universe
+    // Helper to get or create an index for a universe safely
     const getIndex = async (universe: string): Promise<LocalIndex> => {
-        let index = universes[universe];
-        if (!index) {
-            index = new LocalIndex(path.join(config.dataDir, universe));
+        if (universes[universe]) {
+            return universes[universe];
+        }
+        if (creatingIndexes.has(universe)) {
+            return await creatingIndexes.get(universe)!;
+        }
+        const creationPromise = (async () => {
+            const index = new LocalIndex(path.join(config.dataDir, universe));
             if (!await index.isIndexCreated()) {
                 await index.createIndex();
             }
             universes[universe] = index;
-        }
-        return index;
+            creatingIndexes.delete(universe);
+            return index;
+        })();
+        creatingIndexes.set(universe, creationPromise);
+        return await creationPromise;
     };
 
     // Routes
@@ -301,25 +311,28 @@ async function main() {
 
             const vectors = await provider.getEmbeddings(texts);
 
-            for (let i = 0; i < texts.length; i++) {
-                const id = ids[i];
-                const vector = vectors[i];
-                const metadata = { text: texts[i] };
-                if (id) {
-                    const items = await index.listItems();
-                    if (items.find(item => item.id === id)) {
-                        await index.deleteItem(id);
+            let lastOperation = lastOperations.get(universe) || Promise.resolve();
+            const newOperation = lastOperation.then(async () => {
+                for (let i = 0; i < texts.length; i++) {
+                    const id = ids[i];
+                    const vector = vectors[i];
+                    const metadata = { text: texts[i] };
+                    if (id) {
+                        const items = await index.listItems();
+                        if (items.find(item => item.id === id)) {
+                            await index.deleteItem(id);
+                        }
+                        await index.insertItem({ id, vector, metadata });
+                    } else {
+                        await index.insertItem({ vector, metadata });
                     }
-                    await index.insertItem({ id, vector, metadata });
-                } else {
-                    await index.insertItem({ vector, metadata });
                 }
-            }
-
-            if (replace) {
-                await index.deleteItem(replace);
-            }
-
+                if (replace) {
+                    await index.deleteItem(replace);
+                }
+            });
+            lastOperations.set(universe, newOperation);
+            await newOperation;
             res.status(200).json({ status: 'success' });
         } catch (error) {
             logger.error('Error in /emit:', error);
@@ -369,12 +382,15 @@ async function main() {
             }
 
             const index = await getIndex(universe);
-            const queryVector = (await provider.getEmbeddings([thing]))[0];
-            const results = await index.queryItems(queryVector, reach || 10);
-            res.status(200).json({
-                status: 'success',
-                results: results.map(x => ({ closeness: x.score, thing: x.item.metadata.text, id: x.item.id })),
+            let lastOperation = lastOperations.get(universe) || Promise.resolve();
+            const newOperation = lastOperation.then(async () => {
+                const queryVector = (await provider.getEmbeddings([thing]))[0];
+                const results = await index.queryItems(queryVector, reach || 10);
+                return results.map(x => ({ closeness: x.score, thing: x.item.metadata.text, id: x.item.id }));
             });
+            lastOperations.set(universe, newOperation);
+            const results = await newOperation;
+            res.status(200).json({ status: 'success', results });
         } catch (error) {
             logger.error('Error in /resonate:', error);
             res.status(500).json({ error: 'Internal server error' });
@@ -417,7 +433,12 @@ async function main() {
             }
 
             const index = await getIndex(universe);
-            await index.deleteItem(id);
+            let lastOperation = lastOperations.get(universe) || Promise.resolve();
+            const newOperation = lastOperation.then(async () => {
+                await index.deleteItem(id);
+            });
+            lastOperations.set(universe, newOperation);
+            await newOperation;
             res.status(200).json({ status: 'success' });
         } catch (error) {
             logger.error('Error in DELETE /thing:', error);
@@ -454,23 +475,16 @@ async function main() {
                 return;
             }
 
-            const universePath = path.join(config.dataDir, universe);
-
-            try {
-                await fs.promises.access(universePath);
-            } catch (error) {
-                res.status(404).json({ error: 'Universe not found.' });
-                return;
-            }
-
-            try {
+            let lastOperation = lastOperations.get(universe) || Promise.resolve();
+            const deleteOperation = lastOperation.then(async () => {
+                const universePath = path.join(config.dataDir, universe);
                 await fs.promises.rm(universePath, { recursive: true });
                 delete universes[universe];
-                res.status(200).json({ status: 'success' });
-            } catch (error) {
-                logger.error('Error deleting universe:', error);
-                res.status(500).json({ error: `Failed to delete universe: ${error.message}` });
-            }
+                lastOperations.delete(universe);
+            });
+            lastOperations.set(universe, deleteOperation);
+            await deleteOperation;
+            res.status(200).json({ status: 'success' });
         } catch (error) {
             logger.error('Error in DELETE /universe:', error);
             res.status(500).json({ error: 'Internal server error' });
