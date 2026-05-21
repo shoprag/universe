@@ -33,5 +33,9 @@
         "@types/figlet": "^1.7.0",
         "@types/node": "^22.10.1",
         "typescript": "^5.7.2"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/shoprag/universe.git"
     }
 }
