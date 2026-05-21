@@ -5,6 +5,7 @@ import bodyParser from 'body-parser';
 import { LocalIndex } from 'vectra';
 import OpenAI from 'openai';
 import { VoyageAIClient } from 'voyageai';
+import mysql from 'mysql2/promise';
 import path from 'path';
 import dotenv from 'dotenv';
 import { Command } from 'commander';
@@ -26,6 +27,25 @@ dotenv.config();
 interface EmbeddingProvider {
     getEmbeddings(texts: string[]): Promise<number[][]>;
     maxTokens: number;
+}
+
+type ThingInput = {
+    text: string;
+    id?: string;
+};
+
+type ResonanceResult = {
+    closeness: number;
+    thing: string;
+    id: string;
+};
+
+interface UniverseStore {
+    initialize(): Promise<void>;
+    emit(universe: string, things: ThingInput[], vectors: number[][], replace?: string): Promise<void>;
+    resonate(universe: string, queryVector: number[], reach: number): Promise<ResonanceResult[]>;
+    deleteThing(universe: string, id: string): Promise<void>;
+    deleteUniverse(universe: string): Promise<void>;
 }
 
 /**
@@ -80,6 +100,223 @@ class VoyageProvider implements EmbeddingProvider {
     }
 }
 
+class DirectoryUniverseStore implements UniverseStore {
+    private universes: { [key: string]: LocalIndex } = {};
+    private creatingIndexes: Map<string, Promise<LocalIndex>> = new Map();
+
+    constructor(private dataDir: string) { }
+
+    async initialize(): Promise<void> {
+        if (!fs.existsSync(this.dataDir)) {
+            fs.mkdirSync(this.dataDir, { recursive: true });
+        }
+    }
+
+    private async getIndex(universe: string): Promise<LocalIndex> {
+        if (this.universes[universe]) {
+            return this.universes[universe];
+        }
+        if (this.creatingIndexes.has(universe)) {
+            return await this.creatingIndexes.get(universe)!;
+        }
+        const creationPromise = (async () => {
+            const index = new LocalIndex(path.join(this.dataDir, universe));
+            if (!await index.isIndexCreated()) {
+                await index.createIndex();
+            }
+            this.universes[universe] = index;
+            this.creatingIndexes.delete(universe);
+            return index;
+        })();
+        this.creatingIndexes.set(universe, creationPromise);
+        return await creationPromise;
+    }
+
+    async emit(universe: string, things: ThingInput[], vectors: number[][], replace?: string): Promise<void> {
+        const index = await this.getIndex(universe);
+        for (let i = 0; i < things.length; i++) {
+            const thing = things[i];
+            const vector = vectors[i];
+            const metadata = { text: thing.text };
+            if (thing.id) {
+                const items = await index.listItems();
+                if (items.find(item => item.id === thing.id)) {
+                    await index.deleteItem(thing.id);
+                }
+                await index.insertItem({ id: thing.id, vector, metadata });
+            } else {
+                await index.insertItem({ vector, metadata });
+            }
+        }
+        if (replace) {
+            await index.deleteItem(replace);
+        }
+    }
+
+    async resonate(universe: string, queryVector: number[], reach: number): Promise<ResonanceResult[]> {
+        const index = await this.getIndex(universe);
+        const results = await index.queryItems(queryVector, reach);
+        return results.map(x => ({ closeness: x.score, thing: x.item.metadata.text as string, id: x.item.id }));
+    }
+
+    async deleteThing(universe: string, id: string): Promise<void> {
+        const index = await this.getIndex(universe);
+        await index.deleteItem(id);
+    }
+
+    async deleteUniverse(universe: string): Promise<void> {
+        const universePath = path.join(this.dataDir, universe);
+        await fs.promises.rm(universePath, { recursive: true, force: true });
+        delete this.universes[universe];
+        this.creatingIndexes.delete(universe);
+    }
+}
+
+class MySqlUniverseStore implements UniverseStore {
+    private pool: ReturnType<typeof mysql.createPool>;
+    private tableName: string;
+
+    constructor(private config: any) {
+        this.tableName = validateMySqlIdentifier(config.mysqlTable || 'universe_items', 'MySQL table');
+        const port = Number.parseInt(config.mysqlPort || '3306', 10);
+        const connectionLimit = Number.parseInt(config.mysqlConnectionLimit || '10', 10);
+        if (!config.mysqlHost) throw new Error('MySQL host is required when storage is mysql');
+        if (!config.mysqlUser) throw new Error('MySQL user is required when storage is mysql');
+        if (!config.mysqlDatabase) throw new Error('MySQL database is required when storage is mysql');
+        if (!Number.isInteger(port) || port < 1) throw new Error('MySQL port must be a positive integer');
+        if (!Number.isInteger(connectionLimit) || connectionLimit < 1) throw new Error('MySQL connection limit must be a positive integer');
+
+        this.pool = mysql.createPool({
+            host: config.mysqlHost,
+            port,
+            user: config.mysqlUser,
+            password: config.mysqlPassword,
+            database: config.mysqlDatabase,
+            waitForConnections: true,
+            connectionLimit,
+            namedPlaceholders: false,
+        });
+    }
+
+    async initialize(): Promise<void> {
+        const table = this.quotedTableName();
+        await this.pool.query(`
+            CREATE TABLE IF NOT EXISTS ${table} (
+                universe VARCHAR(191) NOT NULL,
+                id VARCHAR(255) NOT NULL,
+                thing LONGTEXT NOT NULL,
+                vector LONGTEXT NOT NULL,
+                norm DOUBLE NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (universe, id),
+                KEY universe_idx (universe)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `);
+    }
+
+    async emit(universe: string, things: ThingInput[], vectors: number[][], replace?: string): Promise<void> {
+        const table = this.quotedTableName();
+        const connection = await this.pool.getConnection();
+        try {
+            await connection.beginTransaction();
+            for (let i = 0; i < things.length; i++) {
+                const thing = things[i];
+                const vector = vectors[i];
+                const id = thing.id || crypto.randomUUID();
+                await connection.execute(
+                    `INSERT INTO ${table} (universe, id, thing, vector, norm)
+                     VALUES (?, ?, ?, ?, ?)
+                     ON DUPLICATE KEY UPDATE
+                        thing = VALUES(thing),
+                        vector = VALUES(vector),
+                        norm = VALUES(norm),
+                        updated_at = CURRENT_TIMESTAMP`,
+                    [universe, id, thing.text, JSON.stringify(vector), vectorNorm(vector)]
+                );
+            }
+            if (replace) {
+                await connection.execute(`DELETE FROM ${table} WHERE universe = ? AND id = ?`, [universe, replace]);
+            }
+            await connection.commit();
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        } finally {
+            connection.release();
+        }
+    }
+
+    async resonate(universe: string, queryVector: number[], reach: number): Promise<ResonanceResult[]> {
+        const table = this.quotedTableName();
+        const [rows] = await this.pool.query(
+            `SELECT id, thing, vector, norm FROM ${table} WHERE universe = ?`,
+            [universe]
+        );
+        const queryNorm = vectorNorm(queryVector);
+        return (rows as Array<{ id: string; thing: string; vector: string; norm: number }>)
+            .map(row => {
+                const vector = JSON.parse(row.vector);
+                const denominator = queryNorm * Number(row.norm || vectorNorm(vector));
+                const closeness = denominator === 0 ? 0 : dotProduct(queryVector, vector) / denominator;
+                return { closeness, thing: row.thing, id: row.id };
+            })
+            .sort((a, b) => b.closeness - a.closeness)
+            .slice(0, reach);
+    }
+
+    async deleteThing(universe: string, id: string): Promise<void> {
+        const table = this.quotedTableName();
+        await this.pool.execute(`DELETE FROM ${table} WHERE universe = ? AND id = ?`, [universe, id]);
+    }
+
+    async deleteUniverse(universe: string): Promise<void> {
+        const table = this.quotedTableName();
+        await this.pool.execute(`DELETE FROM ${table} WHERE universe = ?`, [universe]);
+    }
+
+    private quotedTableName(): string {
+        return `\`${this.tableName}\``;
+    }
+}
+
+function validateMySqlIdentifier(value: string, label: string): string {
+    if (!/^[a-zA-Z0-9_]+$/.test(value)) {
+        throw new Error(`${label} may only contain letters, numbers, and underscores`);
+    }
+    if (value.length > 64) {
+        throw new Error(`${label} must be 64 characters or fewer`);
+    }
+    return value;
+}
+
+function vectorNorm(vector: number[]): number {
+    return Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+}
+
+function dotProduct(left: number[], right: number[]): number {
+    const length = Math.min(left.length, right.length);
+    let sum = 0;
+    for (let i = 0; i < length; i++) {
+        sum += left[i] * right[i];
+    }
+    return sum;
+}
+
+async function createUniverseStore(config: any): Promise<UniverseStore> {
+    const storage = (config.storage || 'directory').toLowerCase();
+    let store: UniverseStore;
+    if (storage === 'directory') {
+        store = new DirectoryUniverseStore(config.dataDir);
+    } else if (storage === 'mysql') {
+        store = new MySqlUniverseStore(config);
+    } else {
+        throw new Error(`Unsupported storage backend: ${config.storage}`);
+    }
+    await store.initialize();
+    return store;
+}
+
 /**
  * Main function to start the Universe server.
  * Checks for required configurations, performs setup if needed, and launches the server.
@@ -101,7 +338,15 @@ async function main() {
         .option('--base-url <url>', 'Base URL for the provider (only for OpenAI)', process.env.BASE_URL)
         .option('--bearer-token <token>', 'Bearer token for authentication', process.env.BEARER_TOKEN)
         .option('--log-level <level>', 'Log level (debug, info, critical)', process.env.LOG_LEVEL || 'info')
+        .option('--storage <backend>', 'Storage backend (directory, mysql)', process.env.STORAGE_BACKEND || process.env.STORAGE || 'directory')
         .option('--data-dir <dir>', 'Directory to store data', process.env.DATA_DIR || './data')
+        .option('--mysql-host <host>', 'MySQL host when storage is mysql', process.env.MYSQL_HOST || process.env.DB_HOST)
+        .option('--mysql-port <port>', 'MySQL port when storage is mysql', process.env.MYSQL_PORT || process.env.DB_PORT || '3306')
+        .option('--mysql-user <user>', 'MySQL user when storage is mysql', process.env.MYSQL_USER || process.env.DB_USER)
+        .option('--mysql-password <password>', 'MySQL password when storage is mysql', process.env.MYSQL_PASSWORD || process.env.DB_PASSWORD)
+        .option('--mysql-database <database>', 'MySQL database when storage is mysql', process.env.MYSQL_DATABASE || process.env.DB_NAME)
+        .option('--mysql-table <table>', 'MySQL table when storage is mysql', process.env.MYSQL_TABLE || process.env.DB_TABLE || 'universe_items')
+        .option('--mysql-connection-limit <limit>', 'MySQL connection pool limit', process.env.MYSQL_CONNECTION_LIMIT || '10')
         .option('--log-requests', 'Log incoming requests', process.env.LOG_REQUESTS === 'true')
         .parse(process.argv);
 
@@ -146,10 +391,7 @@ async function main() {
         throw new Error(`Unsupported provider: ${config.provider}`);
     }
 
-    // Ensure data directory exists
-    if (!fs.existsSync(config.dataDir)) {
-        fs.mkdirSync(config.dataDir, { recursive: true });
-    }
+    const store = await createUniverseStore(config);
 
     // Set up Express app
     const app = express();
@@ -214,31 +456,7 @@ async function main() {
 
     app.use(authenticateBearerToken);
 
-    // Store universe indexes and operation promises
-    const universes: { [key: string]: LocalIndex } = {};
-    const creatingIndexes: Map<string, Promise<LocalIndex>> = new Map();
     const lastOperations: Map<string, Promise<any>> = new Map();
-
-    // Helper to get or create an index for a universe safely
-    const getIndex = async (universe: string): Promise<LocalIndex> => {
-        if (universes[universe]) {
-            return universes[universe];
-        }
-        if (creatingIndexes.has(universe)) {
-            return await creatingIndexes.get(universe)!;
-        }
-        const creationPromise = (async () => {
-            const index = new LocalIndex(path.join(config.dataDir, universe));
-            if (!await index.isIndexCreated()) {
-                await index.createIndex();
-            }
-            universes[universe] = index;
-            creatingIndexes.delete(universe);
-            return index;
-        })();
-        creatingIndexes.set(universe, creationPromise);
-        return await creationPromise;
-    };
 
     // Routes
 
@@ -294,8 +512,6 @@ async function main() {
                 return;
             }
 
-            const index = await getIndex(universe);
-
             let texts: string[];
             let ids: (string | undefined)[];
             if (things) {
@@ -310,26 +526,11 @@ async function main() {
             }
 
             const vectors = await provider.getEmbeddings(texts);
+            const inputThings = texts.map((text, i) => ({ text, id: ids[i] }));
 
             let lastOperation = lastOperations.get(universe) || Promise.resolve();
             const newOperation = lastOperation.then(async () => {
-                for (let i = 0; i < texts.length; i++) {
-                    const id = ids[i];
-                    const vector = vectors[i];
-                    const metadata = { text: texts[i] };
-                    if (id) {
-                        const items = await index.listItems();
-                        if (items.find(item => item.id === id)) {
-                            await index.deleteItem(id);
-                        }
-                        await index.insertItem({ id, vector, metadata });
-                    } else {
-                        await index.insertItem({ vector, metadata });
-                    }
-                }
-                if (replace) {
-                    await index.deleteItem(replace);
-                }
+                await store.emit(universe, inputThings, vectors, replace);
             });
             lastOperations.set(universe, newOperation);
             await newOperation;
@@ -381,12 +582,10 @@ async function main() {
                 return;
             }
 
-            const index = await getIndex(universe);
             let lastOperation = lastOperations.get(universe) || Promise.resolve();
             const newOperation = lastOperation.then(async () => {
                 const queryVector = (await provider.getEmbeddings([thing]))[0];
-                const results = await index.queryItems(queryVector, reach || 10);
-                return results.map(x => ({ closeness: x.score, thing: x.item.metadata.text, id: x.item.id }));
+                return await store.resonate(universe, queryVector, reach || 10);
             });
             lastOperations.set(universe, newOperation);
             const results = await newOperation;
@@ -432,10 +631,9 @@ async function main() {
                 return;
             }
 
-            const index = await getIndex(universe);
             let lastOperation = lastOperations.get(universe) || Promise.resolve();
             const newOperation = lastOperation.then(async () => {
-                await index.deleteItem(id);
+                await store.deleteThing(universe, id);
             });
             lastOperations.set(universe, newOperation);
             await newOperation;
@@ -477,9 +675,7 @@ async function main() {
 
             let lastOperation = lastOperations.get(universe) || Promise.resolve();
             const deleteOperation = lastOperation.then(async () => {
-                const universePath = path.join(config.dataDir, universe);
-                await fs.promises.rm(universePath, { recursive: true });
-                delete universes[universe];
+                await store.deleteUniverse(universe);
                 lastOperations.delete(universe);
             });
             lastOperations.set(universe, deleteOperation);
@@ -591,10 +787,61 @@ async function setupConfig() {
             validate: (input: string) => ['debug', 'info', 'critical'].includes(input) ? true : 'Must be debug, info, or critical!',
         },
         {
+            type: 'list',
+            name: 'storage',
+            message: 'Storage backend:',
+            choices: ['directory', 'mysql'],
+            default: 'directory',
+        },
+        {
             type: 'input',
             name: 'dataDir',
             message: 'Directory to store data:',
             default: './data',
+            when: (answers: any) => answers.storage === 'directory',
+        },
+        {
+            type: 'input',
+            name: 'mysqlHost',
+            message: 'MySQL host:',
+            when: (answers: any) => answers.storage === 'mysql',
+            validate: (input: string) => input.trim() ? true : 'MySQL host is required!',
+        },
+        {
+            type: 'input',
+            name: 'mysqlPort',
+            message: 'MySQL port:',
+            default: '3306',
+            when: (answers: any) => answers.storage === 'mysql',
+            validate: (input: string) => !isNaN(parseInt(input)) ? true : 'Must be a number!',
+        },
+        {
+            type: 'input',
+            name: 'mysqlUser',
+            message: 'MySQL user:',
+            when: (answers: any) => answers.storage === 'mysql',
+            validate: (input: string) => input.trim() ? true : 'MySQL user is required!',
+        },
+        {
+            type: 'password',
+            name: 'mysqlPassword',
+            message: 'MySQL password:',
+            when: (answers: any) => answers.storage === 'mysql',
+        },
+        {
+            type: 'input',
+            name: 'mysqlDatabase',
+            message: 'MySQL database:',
+            when: (answers: any) => answers.storage === 'mysql',
+            validate: (input: string) => input.trim() ? true : 'MySQL database is required!',
+        },
+        {
+            type: 'input',
+            name: 'mysqlTable',
+            message: 'MySQL table:',
+            default: 'universe_items',
+            when: (answers: any) => answers.storage === 'mysql',
+            validate: (input: string) => /^[a-zA-Z0-9_]+$/.test(input) ? true : 'Use only letters, numbers, and underscores!',
         },
         {
             type: 'confirm',
@@ -624,9 +871,20 @@ MODEL=${providerConfig.model}
 PORT=${generalConfig.port}
 BEARER_TOKEN=${generalConfig.bearerToken}
 LOG_LEVEL=${generalConfig.logLevel}
-DATA_DIR=${generalConfig.dataDir}
+STORAGE_BACKEND=${generalConfig.storage}
 LOG_REQUESTS=${generalConfig.logRequests.toString()}
 `.trim();
+    if (generalConfig.storage === 'directory') {
+        envContent += `\nDATA_DIR=${generalConfig.dataDir}`;
+    } else if (generalConfig.storage === 'mysql') {
+        envContent += `
+MYSQL_HOST=${generalConfig.mysqlHost}
+MYSQL_PORT=${generalConfig.mysqlPort}
+MYSQL_USER=${generalConfig.mysqlUser}
+MYSQL_PASSWORD=${generalConfig.mysqlPassword || ''}
+MYSQL_DATABASE=${generalConfig.mysqlDatabase}
+MYSQL_TABLE=${generalConfig.mysqlTable || 'universe_items'}`;
+    }
 
     fs.writeFileSync(path.join(process.cwd(), '.env'), envContent);
     console.log(chalk.green('.env file created successfully! 🎉'));

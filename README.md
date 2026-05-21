@@ -11,6 +11,7 @@ Universe is built to be production-ready, highly configurable, and delightful to
 - **Simple CLI Interface**: Get started with just a few commands.
 - **Flexible Configuration**: Use environment variables, CLI flags, or an interactive setup to configure your server.
 - **Multiple Embedding Providers**: Choose between OpenAI, Voyage, or other providers for generating embeddings.
+- **Pluggable Storage**: Keep things lightweight with the default directory-backed Vectra index, or use MySQL for server and Kubernetes deployments.
 - **Secure Authentication**: Protect your server with bearer token authentication.
 - **Robust Error Handling**: Built-in error handling and logging for a smooth development experience.
 - **Interactive Setup**: Get up and running quickly with an easy-to-follow setup process.
@@ -74,7 +75,15 @@ Universe provides a simple CLI to manage your server:
   - `--base-url <url>`: Base URL for the provider (only for OpenAI, default: https://api.openai.com/v1)
   - `--bearer-token <token>`: Bearer token for authentication
   - `--log-level <level>`: Log level (debug, info, critical) (default: info)
+  - `--storage <backend>`: Storage backend, either `directory` or `mysql` (default: `directory`)
   - `--data-dir <dir>`: Directory to store data (default: ./data)
+  - `--mysql-host <host>`: MySQL host when using `--storage mysql`
+  - `--mysql-port <port>`: MySQL port (default: 3306)
+  - `--mysql-user <user>`: MySQL user
+  - `--mysql-password <password>`: MySQL password
+  - `--mysql-database <database>`: MySQL database
+  - `--mysql-table <table>`: MySQL table for vectors (default: `universe_items`)
+  - `--mysql-connection-limit <limit>`: MySQL connection pool limit (default: 10)
   - `--log-requests`: Log incoming requests (default: false)
 
 ---
@@ -88,17 +97,41 @@ Universe is highly configurable:
   - `API_KEY`: API key for the selected provider
   - `MODEL`: Embedding model (provider-specific)
   - `BASE_URL`: Base URL for the provider (only for OpenAI)
-  - `PORT`, `BEARER_TOKEN`, `LOG_LEVEL`, `DATA_DIR`, `LOG_REQUESTS`
+  - `PORT`, `BEARER_TOKEN`, `LOG_LEVEL`, `STORAGE_BACKEND`, `DATA_DIR`, `LOG_REQUESTS`
+  - `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`, `MYSQL_TABLE`, `MYSQL_CONNECTION_LIMIT`
 - **CLI Flags**: Override settings on the fly when starting the server.
 - **Interactive Setup**: If essential settings are missing, Universe will prompt you to configure them interactively, including selecting the provider and entering provider-specific details.
+
+`STORAGE=mysql` is accepted as an alias for `STORAGE_BACKEND=mysql`. The MySQL settings also accept `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, and `DB_TABLE` aliases for deployment environments that already use those names.
 
 During setup, you'll be asked for:
 - Embedding provider (e.g., OpenAI or Voyage)
 - Provider-specific API key and model
 - Bearer token (with an option to generate one automatically)
-- Port, log level, data directory, and more
+- Port, log level, storage backend, and more
 
 All settings are saved in a `.env` file for future use.
+
+### Storage Backends
+
+Universe uses `directory` storage by default. This keeps the original lightweight behavior and stores local Vectra indexes under `DATA_DIR`.
+
+```bash
+universe --storage directory --data-dir ./data
+```
+
+For deployments that need shared or managed persistence, use MySQL:
+
+```bash
+universe \
+  --storage mysql \
+  --mysql-host mysql.example.internal \
+  --mysql-user universe \
+  --mysql-password secret \
+  --mysql-database universe
+```
+
+The MySQL backend creates the configured table automatically. It stores the text, vector JSON, and vector norm in regular MySQL rows, then computes cosine similarity in the application so the public API stays the same.
 
 ---
 
